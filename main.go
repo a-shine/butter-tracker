@@ -1,80 +1,72 @@
+// Butter tracker package enables the tracking of nodes deployed on a Butter network. It is
+// mostly used for metrics and testing.
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
-	"net/http"
-	"strings"
+	"time"
 
-	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq"
 )
 
-var upgrader = websocket.Upgrader{}
-var todoList []string
+const (
+	host     = "localhost"
+	port     = 5432
+	user     = "postgres"
+	password = "docker"
+	dbname   = "world"
+)
 
-func getCmd(input string) string {
-	inputArr := strings.Split(input, " ")
-	return inputArr[0]
-}
-
-func getMessage(input string) string {
-	inputArr := strings.Split(input, " ")
-	var result string
-	for i := 1; i < len(inputArr); i++ {
-		result += inputArr[i]
-	}
-	return result
-}
-
-func updateTodoList(input string) {
-	tmpList := todoList
-	todoList = []string{}
-	for _, val := range tmpList {
-		if val == input {
-			continue
-		}
-		todoList = append(todoList, val)
-	}
-}
-
-func main() {
-	db := ConnectToDB()
-	query := "SELECT * FROM nodes"
-	rows, err := db.Query(query)
+func ConnectToDB() *sql.DB {
+	psqlInfo := fmt.Sprintf("host=%s port=%d user=%s "+"password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
+	db, err := sql.Open("postgres", psqlInfo)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(rows)
-	http.HandleFunc("/network", func(w http.ResponseWriter, r *http.Request) {
-		// Upgrade upgrades the HTTP server connection to the WebSocket protocol.
-		conn, err := upgrader.Upgrade(w, r, nil)
+	return db
+}
+
+// createSchema for postgres database of Butter nodes
+func createSchema(db *sql.DB) {
+	const drop = `DROP TABLE IF EXISTS nodes;`
+	_, err := db.Exec(drop)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	const create string = `
+  		CREATE TABLE IF NOT EXISTS nodes (
+  		addr VARCHAR NOT NULL PRIMARY KEY,
+  		peers VARCHAR NOT NULL,
+  		groups VARCHAR,
+  		last_seen TIMESTAMP NOT NULL DEFAULT NOW()
+  		);`
+
+	_, err = db.Exec(create)
+}
+
+// This information could be used to generate a live graph of the network and its PCG overlay by
+// integrating the database/TRacker server with websockets
+
+func main() {
+	db := ConnectToDB()
+	defer db.Close()
+	createSchema(db)
+
+	// Nodes periodically ping the Tracker telling the server  they are still alive and hence to
+	// maintain and update their entry in the databse
+	for {
+		time.Sleep(time.Second * 10)
+		//	Remove all the nodes that haven't been seen in a while
+		const delete string = `
+		DELETE FROM nodes
+		WHERE last_seen < NOW() - INTERVAL '10 seconds';`
+		_, err := db.Exec(delete)
 		if err != nil {
-			log.Print("upgrade failed: ", err)
-			return
+			log.Fatal(err)
 		}
-		defer conn.Close()
-
-		// Continuously read and write message
-		for {
-			output := "Current Todos: \n"
-			for _, todo := range todoList {
-				output += "\n - " + todo + "\n"
-			}
-			output += "\n----------------------------------------"
-			message := []byte(output)
-			err = conn.WriteMessage(1, message)
-			if err != nil {
-				log.Println("write failed:", err)
-				break
-			}
-		}
-	})
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "index.html")
-	})
-
-	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
-
-	http.ListenAndServe(":8080", nil)
+	}
 }
